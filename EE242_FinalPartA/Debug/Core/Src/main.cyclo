@@ -1,0 +1,15 @@
+main.c:76:8:ReadADCValue	4
+main.c:98:6:UpdatePWMDutyCycle	3
+main.c:112:8:GetWeight	2
+main.c:117:6:SetWeight	2
+main.c:122:5:Decide	3
+main.c:133:6:Train	2
+main.c:147:5:UpdateLEDState	1
+main.c:159:5:main	6
+main.c:264:6:SystemClock_Config	3
+main.c:311:13:MX_ADC1_Init	3
+main.c:363:13:MX_ADC2_Init	3
+main.c:415:13:MX_TIM3_Init	4
+main.c:464:13:MX_TIM5_Init	4
+main.c:513:13:MX_GPIO_Init	1
+main.c:545:6:Error_Handler	1
