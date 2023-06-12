@@ -18,6 +18,11 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "usb_device.h"
+#include "usbd_cdc_if.h"
+#include <stdbool.h>
+#include <string.h>
+#include <ctype.h>
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -30,12 +35,23 @@
 #define INPUT_COUNT 2
 #define COMBINATION_COUNT 4
 #define ADC_RESOLUTION_MAX_VALUE 4096.0
+#define COMMAND_MAX_WORD_COUNT 20
+#define COMMAND_OUTPUT_BUFFER_SIZE 100
+#define GetArraySize(a) (sizeof(a) / sizeof(*a))
 
 typedef struct InOutData
 {
 	int inputs[INPUT_COUNT];
 	int output;
 } InOutData;
+
+typedef void(*CommandFunc)(char* commandOutputBuffer, char* words[COMMAND_MAX_WORD_COUNT]);
+typedef struct Command
+{
+	const char* command;
+	CommandFunc func;
+} Command;
+
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -58,6 +74,15 @@ TIM_HandleTypeDef htim5;
 /* USER CODE BEGIN PV */
 double bias = 0.5;
 double learningRate = 0.1;
+bool trainingComplete = false;
+
+InOutData combinations[COMBINATION_COUNT] =
+{
+	(InOutData){ .inputs = { 0, 0 }, .output = 0 }, //Green
+	(InOutData){ .inputs = { 0, 1 }, .output = 0 }, //Orange
+	(InOutData){ .inputs = { 1, 0 }, .output = 0 }, //Red
+	(InOutData){ .inputs = { 1, 1 }, .output = 1 }, //Blue
+};
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -130,7 +155,7 @@ int Decide(int* inputs)
 	return sum >= 0 ? 1 : 0;
 }
 
-void Train(InOutData* combinations)
+void TrainOnce(InOutData* combinations)
 {
 	for (int i = 0; i < COMBINATION_COUNT; i++)
 	{
@@ -150,6 +175,175 @@ int UpdateLEDState(InOutData* combinations, int index, uint16_t pin)
     HAL_GPIO_WritePin(GPIOD, pin, result == 1 ? GPIO_PIN_SET : GPIO_PIN_RESET);
     return result;
 }
+
+void GetWordsFromCommand(char* command, char* words[COMMAND_MAX_WORD_COUNT])
+{
+	char* word = strtok(command, " ");
+	words[0] = word;
+	int index = 1;
+	while (word != NULL && index < COMMAND_MAX_WORD_COUNT - 1)
+	{
+        words[index++] = word = strtok(NULL, " ");
+	}
+}
+
+void Retrain(char* commandOutputBuffer, char* words[COMMAND_MAX_WORD_COUNT])
+{
+	if (trainingComplete)
+	{
+		trainingComplete = false;
+		snprintf(commandOutputBuffer, COMMAND_OUTPUT_BUFFER_SIZE, "Retraining.\n");
+	}
+	else
+	{
+		snprintf(commandOutputBuffer, COMMAND_OUTPUT_BUFFER_SIZE, "Previous training not complete.\n");
+	}
+}
+
+void WeightCommand(int index, char* commandOutputBuffer, char* words[COMMAND_MAX_WORD_COUNT])
+{
+	if (strcmp(words[1], "get") && strcmp(words[1], "set"))
+	{
+		snprintf(commandOutputBuffer, COMMAND_OUTPUT_BUFFER_SIZE, "get or set is expected as the first argument.\n");
+		return;
+	}
+	if (!strcmp(words[1], "set"))
+	{
+		SetWeight(index, atof(words[2]));
+	}
+	snprintf(commandOutputBuffer, COMMAND_OUTPUT_BUFFER_SIZE, "weight%d is %f.\n", index, GetWeight(index));
+}
+
+void Weight0Command(char* commandOutputBuffer, char* words[COMMAND_MAX_WORD_COUNT])
+{
+	WeightCommand(0, commandOutputBuffer, words);
+}
+
+void Weight1Command(char* commandOutputBuffer, char* words[COMMAND_MAX_WORD_COUNT])
+{
+	WeightCommand(1, commandOutputBuffer, words);
+}
+
+void BiasCommand(char* commandOutputBuffer, char* words[COMMAND_MAX_WORD_COUNT])
+{
+	if (strcmp(words[1], "get") && strcmp(words[1], "set"))
+	{
+		snprintf(commandOutputBuffer, COMMAND_OUTPUT_BUFFER_SIZE, "get or set is expected as the first argument.\n");
+		return;
+	}
+	if (!strcmp(words[1], "set"))
+	{
+		bias = atof(words[2]);
+	}
+	snprintf(commandOutputBuffer, COMMAND_OUTPUT_BUFFER_SIZE, "bias is %f.\n", bias);
+}
+
+void LearningRateCommand(char* commandOutputBuffer, char* words[COMMAND_MAX_WORD_COUNT])
+{
+	if (strcmp(words[1], "get") && strcmp(words[1], "set"))
+	{
+		snprintf(commandOutputBuffer, COMMAND_OUTPUT_BUFFER_SIZE, "get or set is expected as the first argument.\n");
+		return;
+	}
+	if (!strcmp(words[1], "set"))
+	{
+		learningRate = atof(words[2]);
+	}
+	snprintf(commandOutputBuffer, COMMAND_OUTPUT_BUFFER_SIZE, "learningRate is %f.\n", learningRate);
+}
+
+void InOutCommand(char* commandOutputBuffer, char* words[COMMAND_MAX_WORD_COUNT])
+{
+	if (strcmp(words[1], "get") && strcmp(words[1], "set"))
+	{
+		snprintf(commandOutputBuffer, COMMAND_OUTPUT_BUFFER_SIZE, "get or set is expected as the first argument.\n");
+		return;
+	}
+	if (!strcmp(words[1], "set"))
+	{
+		combinations[0].output    = atoi(words[2]);
+		combinations[1].output    = atoi(words[3]);
+		combinations[2].output    = atoi(words[4]);
+		combinations[3].output    = atoi(words[5]);
+	}
+	snprintf(commandOutputBuffer, COMMAND_OUTPUT_BUFFER_SIZE, "%d %d %d\n%d %d %d\n%d %d %d\n%d %d %d\n",
+		    		combinations[0].inputs[0], combinations[0].inputs[1], combinations[0].output,
+		    		combinations[1].inputs[0], combinations[1].inputs[1], combinations[1].output,
+					combinations[2].inputs[0], combinations[2].inputs[1], combinations[2].output,
+					combinations[3].inputs[0], combinations[3].inputs[1], combinations[3].output);
+}
+
+void ProcessUSBCommand(char* buffer, uint32_t length)
+{
+	//Be able to change weight1, weight2, bias, learning rate, inputs-outputs and restart training
+
+	/*if (buffer[0] == 'c')
+	{
+		memset(buffer, 0, length);
+		return;
+	}*/
+	
+	//retrain doesn't have any arguments. Other commands are used as follows
+	//<command> get prints out the current value(s)
+	//<command> set <value(s)> sets the value(s)
+	Command commands[] =
+	{
+	    (Command) { .command = "retrain", .func = Retrain },
+		(Command) { .command = "weight0", .func = Weight0Command },
+		(Command) { .command = "weight1", .func = Weight1Command },
+		(Command) { .command = "bias", .func = BiasCommand },
+		(Command) { .command = "learningRate", .func = LearningRateCommand },
+		(Command) { .command = "inout", .func = InOutCommand },
+	};
+	char transmitBuffer[COMMAND_OUTPUT_BUFFER_SIZE + 1] = { 0 };
+	char* words[COMMAND_MAX_WORD_COUNT] = { 0 };
+	char* tempBuffer = calloc(length + 1, sizeof(char));
+	for (int i = 0; i < length; i++)
+	{
+		tempBuffer[i] = buffer[i];
+	}
+	memset(buffer, 0, length);
+	GetWordsFromCommand(tempBuffer, words);
+	//The problem is that the command is for some reason holding the previous string
+	//which means when the user inputs a command and then another command, if the second
+	//command is shorter than the first one, the '\0' doesn't get placed at the end of the
+	//current command but instead at the end of the longer one. This in turn results in
+	//strcmp returning strings being not equal even tho the user inputted the right string.
+	int wordCount = 0;
+	while (words[wordCount] != NULL)
+	{
+		wordCount++;
+	}
+	
+	if (wordCount > 0)
+	{
+		int i = 0;
+		for (; i < GetArraySize(commands); i++)
+		{
+			Command cmd = commands[i];
+			if (!strcmp(words[0], cmd.command))
+			{
+				if (cmd.func == NULL)
+				{
+					snprintf(transmitBuffer, COMMAND_OUTPUT_BUFFER_SIZE, "No function defined to be executed for the command.\n");
+					break;
+				}
+				cmd.func(transmitBuffer, words);
+				break;
+			}
+		}
+		if (i == GetArraySize(commands))
+		{
+			snprintf(transmitBuffer, COMMAND_OUTPUT_BUFFER_SIZE, "No matching command found. (given command: %s)\n", words[0]);
+		}
+	}
+	else
+	{
+		snprintf(transmitBuffer, COMMAND_OUTPUT_BUFFER_SIZE, "No words found in given command.\n");
+	}
+	CDC_Transmit_FS((uint8_t*)transmitBuffer, strlen(transmitBuffer));
+	free(tempBuffer);
+}
 /* USER CODE END 0 */
 
 /**
@@ -159,20 +353,10 @@ int UpdateLEDState(InOutData* combinations, int index, uint16_t pin)
 int main(void)
 {
   /* USER CODE BEGIN 1 */
-	
 	/*
 	TIM3 (PA7) should be connected to ADC1 (PA0)
 	TIM5 (PA1) should be connected to ADC2 (PA5)
 	*/
-	
-	InOutData combinations[COMBINATION_COUNT] =
-    {
-    	(InOutData){ .inputs = { 0, 0 }, .output = 0 }, //Green
-    	(InOutData){ .inputs = { 0, 1 }, .output = 0 }, //Orange
-    	(InOutData){ .inputs = { 1, 0 }, .output = 0 }, //Red
-    	(InOutData){ .inputs = { 1, 1 }, .output = 1 }, //Blue
-    };
-
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
@@ -197,6 +381,7 @@ int main(void)
   MX_TIM5_Init();
   MX_TIM3_Init();
   MX_ADC2_Init();
+  MX_USB_DEVICE_Init();
   /* USER CODE BEGIN 2 */
   
   HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_2);
@@ -213,43 +398,45 @@ int main(void)
   UpdatePWMDutyCycle(&htim5, 0.68);
   while (1)
   {
-	  Train(combinations);
-	  
-	  /*
-	   PIN12 -  Green  (comb0)
-	   PIN13 - Orange  (comb1)
-	   PIN14 -    Red  (comb2)
-	   PIN15 -   Blue  (comb3)
-	  */
-	  
-	  int decision0 = UpdateLEDState(combinations, 0, comb0LED_Pin);
-	  int decision1 = UpdateLEDState(combinations, 1, comb1LED_Pin);
-	  int decision2 = UpdateLEDState(combinations, 2, comb2LED_Pin);
-	  int decision3 = UpdateLEDState(combinations, 3, comb3LED_Pin);
-	  
-      if (decision0 == combinations[0].output &&
-          decision1 == combinations[1].output &&
-          decision2 == combinations[2].output &&
-          decision3 == combinations[3].output)
-      {
-    	  //Signal training complete
-    	  HAL_Delay(500);
-    	  for (int i = 0; i < 5; i++)
-    	  {
-    		  HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12, i % 2);
-    		  HAL_GPIO_WritePin(GPIOD, GPIO_PIN_13, i % 2);
-    		  HAL_GPIO_WritePin(GPIOD, GPIO_PIN_14, i % 2);
-    		  HAL_GPIO_WritePin(GPIOD, GPIO_PIN_15, i % 2);
-    		  HAL_Delay(500);
-    	  }
-    	  //Show the results again
-    	  HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12, decision0);
-    	  HAL_GPIO_WritePin(GPIOD, GPIO_PIN_13, decision1);
-    	  HAL_GPIO_WritePin(GPIOD, GPIO_PIN_14, decision2);
-    	  HAL_GPIO_WritePin(GPIOD, GPIO_PIN_15, decision3);
-      	break;
-      }
-	  
+	  if (!trainingComplete)
+	  {
+		  TrainOnce(combinations);
+		  	  
+		  /*
+		  PIN12 -  Green  (comb0)
+		  PIN13 - Orange  (comb1)
+		  PIN14 -    Red  (comb2)
+		  PIN15 -   Blue  (comb3)
+		  */
+		  int decision0 = UpdateLEDState(combinations, 0, comb0LED_Pin);
+		  int decision1 = UpdateLEDState(combinations, 1, comb1LED_Pin);
+		  int decision2 = UpdateLEDState(combinations, 2, comb2LED_Pin);
+		  int decision3 = UpdateLEDState(combinations, 3, comb3LED_Pin);
+		  	  
+		  if (decision0 == combinations[0].output &&
+		      decision1 == combinations[1].output &&
+		      decision2 == combinations[2].output &&
+		      decision3 == combinations[3].output)
+		  {
+		      //Signal training complete
+			  HAL_Delay(500);
+			  for (int i = 0; i < 5; i++)
+			  {
+				  HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12, i % 2);
+				  HAL_GPIO_WritePin(GPIOD, GPIO_PIN_13, i % 2);
+				  HAL_GPIO_WritePin(GPIOD, GPIO_PIN_14, i % 2);
+				  HAL_GPIO_WritePin(GPIOD, GPIO_PIN_15, i % 2);
+				  HAL_Delay(500);
+			  }
+			  //Show the results again
+		  	  HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12, decision0);
+		  	  HAL_GPIO_WritePin(GPIOD, GPIO_PIN_13, decision1);
+		  	  HAL_GPIO_WritePin(GPIOD, GPIO_PIN_14, decision2);
+		  	  HAL_GPIO_WritePin(GPIOD, GPIO_PIN_15, decision3);
+		      trainingComplete = true;
+	      }
+	  }
+	  	  
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -274,13 +461,12 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
-  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
-  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.HSEState = RCC_HSE_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
-  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
   RCC_OscInitStruct.PLL.PLLM = 8;
-  RCC_OscInitStruct.PLL.PLLN = 168;
+  RCC_OscInitStruct.PLL.PLLN = 336;
   RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
   RCC_OscInitStruct.PLL.PLLQ = 7;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
@@ -517,6 +703,7 @@ static void MX_GPIO_Init(void)
 /* USER CODE END MX_GPIO_Init_1 */
 
   /* GPIO Ports Clock Enable */
+  __HAL_RCC_GPIOH_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOD_CLK_ENABLE();
 
