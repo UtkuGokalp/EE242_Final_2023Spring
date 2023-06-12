@@ -276,12 +276,6 @@ void InOutCommand(char* commandOutputBuffer, char* words[COMMAND_MAX_WORD_COUNT]
 void ProcessUSBCommand(char* buffer, uint32_t length)
 {
 	//Be able to change weight1, weight2, bias, learning rate, inputs-outputs and restart training
-
-	/*if (buffer[0] == 'c')
-	{
-		memset(buffer, 0, length);
-		return;
-	}*/
 	
 	//retrain doesn't have any arguments. Other commands are used as follows
 	//<command> get prints out the current value(s)
@@ -304,11 +298,6 @@ void ProcessUSBCommand(char* buffer, uint32_t length)
 	}
 	memset(buffer, 0, length);
 	GetWordsFromCommand(tempBuffer, words);
-	//The problem is that the command is for some reason holding the previous string
-	//which means when the user inputs a command and then another command, if the second
-	//command is shorter than the first one, the '\0' doesn't get placed at the end of the
-	//current command but instead at the end of the longer one. This in turn results in
-	//strcmp returning strings being not equal even tho the user inputted the right string.
 	int wordCount = 0;
 	while (words[wordCount] != NULL)
 	{
